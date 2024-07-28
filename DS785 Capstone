@@ -1,0 +1,1576 @@
+# -*- coding: utf-8 -*-
+"""
+Spyder Editor
+
+This is a temporary script file.
+"""
+
+# -*- coding: utf-8 -*-
+"""
+Created on Mon July 21 18:34:32 2024
+
+@author: dawnm
+"""
+
+# Imports
+
+from surprise import Reader, Dataset, KNNBasic, NormalPredictor, BaselineOnly, KNNWithMeans, KNNBaseline
+from nltk.stem import WordNetLemmatizer
+from surprise import Reader
+from surprise import Dataset
+from surprise import NMF
+from surprise import SVD
+from IPython.display import display, IFrame
+import random
+from surprise import accuracy
+from surprise.model_selection import GridSearchCV
+from surprise.model_selection import cross_validate
+from surprise import SVD, SVDpp, NMF, SlopeOne, CoClustering
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import train_test_split
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+import seaborn as sns
+import regex as re
+import warnings
+from tqdm.auto import tqdm
+from collections import Counter
+import string
+from nltk.corpus import wordnet as wn
+from sklearn.feature_extraction import text
+from IPython.core.display import HTML
+
+# computational imports
+import numpy as np
+import pandas as pd
+from ast import literal_eval
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel
+import nltk
+from nltk.tokenize import sent_tokenize
+from nltk import word_tokenize
+nltk.download('averaged_perceptron_tagger')
+from operator import itemgetter
+
+
+
+
+######################### Token/Lemmantizer ################################
+# Title: DS775 Prescriptive Analytics
+# Author: Jeff Baggett
+# Date: Spring 2023
+# Availability: #https://github.com/DataScienceUWL/DS775/blob/main/Lessons/Lesson%2013%#20-#%20RecSys%201/Lesson_13.ipynb
+
+# function to get part of speech
+def get_wordnet_pos(word, pretagged=False):
+    """Map POS tag to first character lemmatize() accepts"""
+    if pretagged:
+        tag = word[1].upper()
+    else:
+        tag = nltk.pos_tag([word])[0][1][0].upper()
+
+    tag_dict = {"J": wn.ADJ,
+                "N": wn.NOUN,
+                "V": wn.VERB,
+                "R": wn.ADV}
+
+    return tag_dict.get(tag, wn.NOUN)
+
+# tokenizer that uses lemmatization (word shortening)
+class LemmaTokenizer(object):
+    def __init__(self):
+        self.wnl = WordNetLemmatizer()
+
+    def __call__(self, articles):
+
+        # get the sentences
+        sents = sent_tokenize(articles)
+        # get the parts of speech for sentence tokens
+        sent_pos = [nltk.pos_tag(word_tokenize(s)) for s in sents]
+        # flatten the list
+        pos = [item for sublist in sent_pos for item in sublist]
+        # lemmatize based on POS (otherwise, all words are nouns)
+        lems = [self.wnl.lemmatize(t[0], get_wordnet_pos(t, True))
+                for t in pos if t[0] not in string.punctuation]
+        # clean up in-word punctuation
+        lems_clean = [
+            ''.join(c for c in s if c not in string.punctuation) for s in lems]
+        return lems_clean
+
+
+# lemmatize the stop words
+lemmatizer = WordNetLemmatizer()
+lemmatized_stop_words = [lemmatizer.lemmatize(
+    w) for w in text.ENGLISH_STOP_WORDS]
+# extend the stop words with any other words you want to add
+lemmatized_stop_words.extend(['ve', 'nt', 'ca', 'wo', 'll'])
+
+###########################################################################
+
+
+# Data Imports
+all_recipes = pd.read_csv('RAW_recipes.csv')
+all_ratings = pd.read_csv('RAW_interactions.csv')
+
+all_ratings.head()
+
+
+#Count occurence of words in tag feature
+tags_count = Counter()
+for tags in tqdm(all_recipes['tags']):
+    tags_count.update(literal_eval(tags))
+
+
+#Count number of reviews received by each recipe and number of recipes rated by each user
+all_ratings['counts'] = all_ratings.groupby(
+    ['recipe_id'])['rating'].transform('count')
+all_ratings['reviews'] = all_ratings.groupby(
+    ['user_id'])['rating'].transform('count')
+
+
+# merge data files
+food_df2 = pd.merge(all_ratings, all_recipes,
+                    left_on='recipe_id', right_on='id')
+
+# zero rated recipes
+zerorev = food_df2.loc[food_df2['rating'] == 0, ['rating', 'review']]
+
+# Limit data on healthy recipes, no zero rated recipes etc.
+food_df2 = food_df2[(food_df2['counts'] > 9) & (food_df2['reviews'] > 9) & (food_df2['rating'] > 0) & (
+    food_df2['minutes'] > 0) & ((food_df2['tags'].str.contains("healthy")) | (food_df2['tags'].str.contains("healthy-2")))]
+
+
+# Separate nutritional info field into one field per nutrient
+
+def split_nutrition_array(text):
+    
+    sep_text = text.replace('[', '').replace(']', '').replace('(', '').replace(')', '')
+        
+    list_nut = sep_text.split(',')
+    
+    list_nut = [eval(num) for num in list_nut]
+    
+    return list_nut
+
+food_df2['nutrition_arr'] = food_df2['nutrition'].apply(
+    split_nutrition_array)
+
+food_df2 = food_df2.nutrition_arr.apply(pd.Series).merge(food_df2, right_index=True, left_index=True).rename(
+    columns={0: "num_cal", 1: "total_fat", 2: "sugar", 3: "sodium", 4: "protein", 5: "saturated_fat", 6: "carbohydrates"})  # .drop(['nutrition', 'nutrition_arr'], axis=1)
+
+food_df2 = food_df2.reset_index(drop=True)
+
+nutritional_columns = ['num_cal', 'total_fat', 'sugar',
+                       'sodium', 'protein', 'saturated_fat', 'carbohydrates']
+
+sns.boxplot(data=food_df2[nutritional_columns])
+plt.xlabel('Nutritional Feature')
+plt.ylabel('Value')
+plt.title('Nutritional Analysis')
+plt.xticks(rotation=45)
+plt.show()
+
+
+# Dataframe with just recipes
+food_df = food_df2.drop(['user_id', 'recipe_id', 'date', 'rating',
+                        'review', 'counts', 'reviews', 'nutrition', 'nutrition_arr'], axis=1)
+food_df = food_df.drop_duplicates(keep='first')
+
+
+descfood = food_df.describe()
+
+# Remove minute outliers
+food_df = food_df[food_df['minutes'] <= 5000]
+food_df2 = food_df2[food_df2['minutes'] <= 5000]
+
+
+print('Missing values make up', round(food_df.isna().sum().sum() /
+      food_df.shape[0]*100, 2), "%", "of the overall data.")
+
+# Remove missing description rows
+food_df.dropna(subset=['description'], inplace=True)
+food_df2.dropna(subset=['description'], inplace=True)
+
+# food_df2 was saved after sentiemtn analysis for easy retrieval
+food_df2 = pd.read_excel('food_df2.xlsx')
+
+ratings_df = food_df2.drop(['counts', 'reviews', 'date', 'minutes', 'contributor_id', 'submitted', 'tags', 'num_cal', 'total_fat', 'sugar', 'sodium',
+                           'protein', 'saturated_fat', 'carbohydrates', 'n_steps', 'steps', 'description', 'ingredients', 'n_ingredients', 'nutrition', 'nutrition_arr'], axis=1)
+
+ratings = food_df2.drop(['review', 'name', 'id', 'counts', 'reviews', 'date', 'minutes', 'contributor_id', 'submitted', 'tags', 'num_cal', 'total_fat', 'sugar',
+                        'sodium', 'protein', 'saturated_fat', 'carbohydrates', 'n_steps', 'steps', 'description', 'ingredients', 'n_ingredients', 'nutrition', 'nutrition_arr'], axis=1)
+
+ratings = ratings.drop_duplicates(keep='first')
+ratings = ratings.reset_index(drop=True)
+
+columns_to_copy = ['user_id','recipe_id','rating']
+ratings = food_df2[columns_to_copy].copy()
+
+
+
+columns_to_copy = ['user_id','recipe_id','SentScore']
+sent_ratings = food_df2[columns_to_copy].copy()
+
+
+custom_palette = sns.color_palette("Blues", len(ratings.rating.value_counts()))
+
+# Create the bar plot with custom palette
+sns.barplot(x=ratings.rating.value_counts().index,
+            y=ratings.rating.value_counts(),
+            palette=custom_palette)
+
+# Set plot labels and title
+plt.xlabel('Rating')
+plt.ylabel('Frequency')
+plt.title('Distribution of Ratings')
+plt.show()
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Calculate the frequency counts and convert to percentage
+rating_counts = ratings.rating.value_counts(normalize=True) * 100
+
+# Create a custom color palette
+custom_palette = sns.color_palette("Blues", len(rating_counts))
+
+# Create the histogram
+sns.barplot(x=rating_counts.index, y=rating_counts.values, palette=custom_palette)
+
+# Set plot labels and title
+plt.xlabel('Rating')
+plt.ylabel('Percentage (%)')
+plt.title('Distribution of Ratings (Percentage)')
+plt.ylim(0, 100)  # Set y-axis limit from 0 to 100%
+plt.show()
+
+# Correlation Heat Map
+
+plt.figure(figsize=(15, 6))
+sns.heatmap(food_df.corr(), annot=True)
+
+correlation_matrix = food_df[['num_cal', 'total_fat', 'sugar',
+                              'sodium', 'protein', 'saturated_fat', 'carbohydrates']].corr()
+sns.heatmap(correlation_matrix, annot=True, cmap = 'Blues', cbar = True)
+plt.title('Correlation Matrix')
+plt.show()
+
+
+# Ingredient Word Cloud
+
+# Concatenate all ingredients into a single string
+ingredients_text = ' '.join(
+    food_df['ingredients'].explode().str.replace("'", ""))
+
+# Create a WordCloud object 
+wordcloud = WordCloud(width=800, height=400,
+                      background_color='black').generate(ingredients_text)
+
+# Display the word cloud
+plt.figure(figsize=(10, 6))
+plt.imshow(wordcloud, interpolation='bilinear')
+plt.axis('off')
+plt.title('Ingredient Word Cloud')
+plt.show()
+
+
+
+# Tag Word Cloud
+word_freq = tags_count
+wordcloud = WordCloud(width=800, height=400, background_color='black').generate_from_frequencies(word_freq)
+
+plt.figure(figsize=(10, 5))
+plt.imshow(wordcloud, interpolation='bilinear')
+plt.axis('off')
+plt.title('Tags Word Cloud')
+plt.show()
+
+
+food_df.isnull().sum().sort_values(ascending=False)
+ratings.isnull().sum().sort_values(ascending=False)
+
+
+# Find duplicate recipe names, add -1 if repeat
+
+duplicates = food_df[food_df.duplicated('name', keep=False)]
+print(duplicates)
+
+import pandas as pd
+
+# Find duplicate names
+duplicates = food_df[food_df.duplicated('name', keep=False)]
+
+# Iterate over duplicate names and rename one of them
+for name in duplicates['name'].unique():
+    indices = duplicates[duplicates['name'] == name].index
+    # Append a suffix to one of the duplicate names
+    for i, idx in enumerate(indices):
+        if i == 0:
+            # Don't rename the first occurrence
+            continue
+        # Rename the subsequent occurrences with a suffix
+        new_name = f"{name}_{i}"
+        food_df.at[idx, 'name'] = new_name
+
+descfood = food_df.describe()
+ratings.describe()
+
+# Calculations of Weighted Rating
+
+df2 = ratings.copy()  
+df2 = df2.drop_duplicates(keep='first')
+df2 = df2.reset_index(drop=True)
+
+
+C = df2['rating'].mean()
+print(C)
+df3 = df2.groupby(['recipe_id'])['rating'].agg(['mean', 'count'])
+df3.reset_index(inplace=True)
+
+df3.rename(columns={'recipe_id': 'id',
+           'mean': 'average_rating', 'count': 'votes'}, inplace=True)
+food_df5 = pd.merge(food_df, df3, left_on='id', right_on='id')
+food_df5 = food_df5.drop_duplicates(keep='first')
+df2 = df2.reset_index(drop=True)
+
+
+q = df3['votes'].quantile(0.7)
+print(q)
+
+top_meals = food_df5.copy().loc[df3['votes'] >= q]
+
+tags_count = Counter()
+for tags in tqdm(food_df['tags']):
+    tags_count.update(literal_eval(tags))
+    
+    
+ingredient_count = Counter()
+for ingredients in tqdm(food_df['ingredients']):
+    ingredient_count.update(literal_eval(ingredients))
+
+# Function to calc weighted rating
+def weighted_rating(x, m=q, c=C):
+    v = x['votes']
+    R = x['average_rating']
+    return (v/(v+m) * R) + (m/(m+v) * C)
+
+
+# Top 20 meals based on weighted rating
+
+top_meals['Score'] = top_meals.apply(weighted_rating, axis=1)
+food_df5['Score'] = food_df5.apply(weighted_rating, axis=1)
+
+top_meals[['name', 'votes', 'average_rating', 'Score']].head(20)
+
+top_meals = food_df5[['name', 'votes', 'average_rating', 'Score']].head(20)
+top_meals = top_meals.sort_values(by='Score', ascending=False)
+
+plt.figure(figsize=(10, 6))
+plt.barh(top_meals['name'], top_meals['Score'], color='lightblue')
+plt.xlabel('Score')
+plt.ylabel('Recipe Name')
+plt.title('Top 20 Recipes with Highest Score')
+plt.gca().invert_yaxis()
+plt.xlim(3,max(top_meals['Score'])+1)
+plt.show()
+
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+
+# Create scatter plots
+sns.set(style="ticks")
+sns.pairplot(food_df)
+plt.show()
+
+
+
+# Create histograms for each variable
+food_df.hist(figsize=(10, 6), bins=40)  
+plt.tight_layout()  
+plt.show()
+
+
+# Create histograms for each variable
+food_df.hist(figsize=(10, 6), bins=40, density=True)  # Use density=True for percentage
+
+# Adjust y-axis to show percentage
+for ax in plt.gcf().get_axes():
+    ax.set_ylabel('Percentage (%)')
+    # Convert y-ticks from density to percentage
+    ax.set_yticks(ax.get_yticks())  # Retain existing y-ticks
+    ax.set_yticklabels([f'{int(tick * 100)}%' for tick in ax.get_yticks()])
+
+plt.tight_layout()  
+plt.show()
+
+
+# Rating and Sentiment Score Distributions
+# Create the figure and the two subplot axes
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+
+# Plotting histograms
+ax1.hist(food_df2['rating'], bins=5, edgecolor='black', alpha=0.7, density = True)
+ax2.hist(food_df2['SentScore'], bins=5, edgecolor='black', alpha=0.7, density = True)
+
+# Adding labels and title
+ax1.set_xlabel('Ratings')
+ax1.set_ylabel('Percentage')
+ax1.set_title('Distribution of Ratings')
+
+ax2.set_xlabel('Sent Score')
+ax2.set_ylabel('Percentage')
+ax2.set_title('Distribution of Sentiment Score')
+
+# Adjust layout
+plt.tight_layout()
+
+# Show plot
+plt.show()
+
+
+
+# import required 
+import pandas as pd
+import csv
+from textblob import TextBlob
+#from textblob.sentiments import NaiveBayesAnalyzers
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from nltk.corpus import stopwords
+import string
+import nltk
+import textmining
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud,STOPWORDS
+#set the working dierectory
+import os
+import numpy as np
+from ast import literal_eval
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel
+import nltk
+from nltk.tokenize import sent_tokenize
+from nltk import word_tokenize    
+nltk.download('averaged_perceptron_tagger')
+from sklearn.feature_extraction import text
+from nltk.stem import WordNetLemmatizer 
+from nltk.corpus import wordnet as wn
+import string
+
+
+####################### Sentiment Anaylsis #######################
+
+import nltk
+
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+
+from nltk.corpus import stopwords
+
+from nltk.tokenize import word_tokenize
+
+from nltk.stem import WordNetLemmatizer
+#nltk.download('all')
+
+#df2 = text_df.copy()
+
+
+nltk.download('stopwords')
+
+# Get the standard NLTK English stopwords
+nltk_stopwords = stopwords.words('english')
+
+# Create custom stopwords list
+custom_stopwords = nltk_stopwords.copy()  
+custom_stopwords.remove('not')  
+
+
+# create text prep function
+def prep_text(text):
+
+    # Tokenize the text
+    tokens = word_tokenize(text.lower())
+
+    # Remove stop words
+    filtered_tokens = []
+    for token in tokens:
+        if token not in custom_stopwords:
+            filtered_tokens.append(token)
+
+    # Lemmatize the tokens
+    lemmatizer = WordNetLemmatizer()
+
+    lemmatized_tokens = []
+    for token in filtered_tokens:
+        lemmatized_tokens.append(lemmatizer.lemmatize(token))
+
+    # Join the tokens into a string
+    processed_text = ' '.join(lemmatized_tokens)
+    return processed_text
+
+# apply the function df (results were saved so do not run again)
+
+# food_df2['cleaned_review'] = food_df2['review'].apply(prep_text)
+# df2.head()
+
+
+
+# initialize NLTK sentiment analyzer
+
+analyzer = SentimentIntensityAnalyzer()
+
+def get_polarity(text):
+    scores = analyzer.polarity_scores(text)
+    positive = scores['pos']
+    neutral = scores['neu']
+    negative = scores['neg']
+    compound = scores['compound']
+
+    return positive, neutral, negative, compound
+
+
+######### Don't rerun, file already saved with results
+#food_df2['positive'], food_df2['neutral'], food_df2['negative'], food_df2['compound'] = zip(*food_df2['review'].apply(get_polarity))
+
+# Calibrate Sentiment Score to scale 1 - 5
+
+def convert_range(value, old_min, old_max, new_min, new_max):
+    transformed_value = ((value - old_min) / (old_max - old_min)) * (new_max - new_min) + new_min
+    return round(transformed_value)
+
+# Define old and new ranges
+old_min = -1
+old_max = 1
+new_min = 1
+new_max = 5
+
+# Apply the transformation to the 'compound' column
+food_df2['SentScore'] = food_df2['compound'].apply(lambda x: convert_range(x, old_min, old_max, new_min, new_max))
+
+
+
+# NLTK Vader Graphs
+
+# Set a blues palette
+blues_palette = sns.color_palette("Blues")
+
+# Create subplots
+fig, axs = plt.subplots(1, 4, figsize=(12, 4))
+
+# Plot distribution plots with the specified palette
+sns.histplot(data=food_df2, x='positive', ax=axs[0], color=blues_palette[4], kde=True)
+sns.histplot(data=food_df2, x='neutral', ax=axs[1], color=blues_palette[4], kde=True)
+sns.histplot(data=food_df2, x='negative', ax=axs[2], color=blues_palette[4], kde=True)
+sns.histplot(data=food_df2, x='compound', ax=axs[3], color=blues_palette[4], kde=True)
+
+# Set titles
+axs[0].set_title('Positive Distribution')
+axs[1].set_title('Neutral Distribution')
+axs[2].set_title('Negative Distribution')
+axs[3].set_title('Compound Distribution')
+
+# Set the main title
+plt.suptitle('Sentiment Analysis Distribution', y=1.05)
+
+# Adjust layout
+plt.tight_layout()
+
+# Show the plot
+plt.show()
+
+
+# Confusion Matrix
+
+from sklearn.metrics import confusion_matrix
+
+print(confusion_matrix(food_df2['rating'], food_df2['SentScore']))
+
+from sklearn.metrics import classification_report
+
+print(classification_report(food_df2['rating'], food_df2['SentScore']))
+
+# Plot of Sentiment Analsys by Rating
+
+# Set a blues palette
+blues_palette = sns.color_palette("Blues")
+
+# Create subplots
+fig, axs = plt.subplots(1, 4, figsize=(12, 4))
+
+# Plot barplots with the specified palette
+sns.barplot(data=food_df2, x='rating', y='positive', ax=axs[0], palette=blues_palette)
+sns.barplot(data=food_df2, x='rating', y='neutral', ax=axs[1], palette=blues_palette)
+sns.barplot(data=food_df2, x='rating', y='negative', ax=axs[2], palette=blues_palette)
+sns.barplot(data=food_df2, x='rating', y='compound', ax=axs[3], palette=blues_palette)
+
+# Set titles
+axs[0].set_title('Positive')
+axs[1].set_title('Neutral')
+axs[2].set_title('Negative')
+axs[3].set_title('Compound')
+
+# Set the main title
+plt.suptitle('Sentiment Analysis by Rating', y=1.05)
+
+# Adjust layout
+plt.tight_layout()
+
+# Show the plot
+plt.show()
+
+####################### Knowledge-Based Recommender ####################
+
+# Knowlege-based function
+def knowledge_base(food_df, percentile=0.8, name=None, ingredients=None,  saturated_fat=None, sugar=None, sodium=None):
+
+    # User Input
+    if name is None:
+        print("Input preferred recipe type")
+        name = input()
+
+    if ingredients is None:
+        print("Input preferred ingredient")
+        ingredients = input()
+
+    
+    if saturated_fat is None:
+        print("Input maximum number of saturated fat")
+        saturated_fat = int(input())
+
+   
+    if sugar is None:
+        print("Input maximum PDV of sugar")
+        sugar = int(input())
+
+   
+    if sodium is None:
+        print("Input maximum PDV of sodium")
+        sodium = int(input())
+
+    # Define a new reciperesults variable to store the preferred recipes. 
+    reciperesults = food_df.copy()
+
+    # Filter based on the condition
+    reciperesults = reciperesults[(reciperesults['name'].str.contains(name)) &  
+                                  (reciperesults['ingredients'].apply(lambda x: ingredients in x)) &
+                                  (reciperesults['saturated_fat'] <= saturated_fat) &
+                                  (reciperesults['sugar'] <= sugar) &
+                                  (reciperesults['sodium'] <= sodium)]
+
+    # Calculate the values of C and m
+    C = reciperesults['average_rating'].mean()
+    m = reciperesults['votes'].quantile(percentile)
+
+    # Include recipes that have higher than m votes. 
+    q_reciperesults = reciperesults.copy().loc[reciperesults['votes'] >= m]
+
+    def calculate_score(row):
+        votes = row['votes']
+        average_rating = row['average_rating']
+        score = (votes / (votes + m) * average_rating) + (m / (m + votes) * C)
+        return score
+
+    # Apply the function to each row of the DataFrame
+    q_reciperesults['score'] = q_reciperesults.apply(calculate_score, axis=1)
+
+    # Sort recipes in descending order
+    q_reciperesults = q_reciperesults.sort_values('score', ascending=False)
+    return q_reciperesults
+
+# Chicken
+out_recipesa = knowledge_base(food_df5, .7, 'chicken', 'rice', 15, 25, 30)
+
+#Low Sat Fat
+out_recipeslf = knowledge_base(food_df5, .7, '','' , 15, 30, 30)
+out_recipeslf
+
+
+# Salad
+out_recipesb = knowledge_base(food_df5, .7, 'salad', 'beans', 10, 30, 30)
+
+# Low Sugar
+out_recipesls = knowledge_base(food_df5, .7, '','' , 30, 15, 30)
+out_recipesls
+
+# Cookie
+out_recipesc = knowledge_base(food_df5, .7, 'cookies', 'oats', 10, 40, 25)
+
+# Low Sodium
+out_recipesld = knowledge_base(food_df5, .7, '','' , 30, 30, 15)
+out_recipesld
+
+########################## Content-Based Recommender ########################
+
+# Remove extra spaces from names
+food_df['name'] = food_df['name'].str.replace(r'\s+', ' ')
+
+
+def clean(x):
+    if isinstance(x, list):
+        result = []  # Create an empty list to store cleaned strings
+        for item in x:
+            # Convert item to string and lowercase
+            cleaned = str(item).lower()
+            # Remove punctuation
+            cleaned = ''.join(char for char in cleaned if char not in string.punctuation)
+            # Split and join with spaces
+            cleaned = ' '.join(cleaned.split())
+            result.append(cleaned)  # Append cleaned string to the result list
+        return result
+    
+    elif isinstance(x, str):
+        # Convert string to lowercase
+        cleaned = str(x).lower()
+        # Remove punctuation
+        cleaned = ''.join(char for char in cleaned if char not in string.punctuation)
+        # Split and join with spaces
+        cleaned = ' '.join(cleaned.split())
+        return cleaned
+    
+    else:
+        return ''  # Return an empty string if x is neither a list nor a string
+
+
+# Define a function to split tags, remove quotes, and flatten the resulting list
+def split_tags(tags):
+    return [word.replace('"', '') for tag in tags for word in tag.split('-')]
+
+# Call the function to get the list of words
+word_list = split_tags(tags)
+
+# Join the words into a single string with spaces between them
+formatted_words = ' '.join(word_list)
+print(formatted_words)
+
+
+# literal_eval and clean columns
+food_df['tags'] = food_df['tags'].apply(literal_eval).apply(clean)
+food_df['description'] = food_df['description'].apply(clean)
+food_df['ingredients'] = food_df['ingredients'].apply(
+    literal_eval)  # .apply(clean)
+
+
+
+# Create and Combine ingredients and tags as "soup" for content recom
+
+food_df['soup'] = food_df['ingredients'].apply(' '.join)
+food_df['soup2'] = food_df['soup'] + ' ' + food_df['tags'].apply(lambda x: ' '.join(x))
+
+print(f'The soup for {food_df["name"][24]} is: \n{food_df["soup2"][24]}')
+
+
+# Function to calc similarity matrix
+def makesimmatrix(df, soupCol, vectorizer, vectorType='Tfidf'):
+# Adapted from
+# Title: DS775 Prescriptive Analytics
+# Author: Jeff Baggett
+# Date: Spring 2023
+# Availability: #https://github.com/DataScienceUWL/DS775/blob/main/Lessons/Lesson%2013%#20-#%20RecSys%201/Lesson_13.ipynb
+
+    '''
+    Parameters
+    df: the dataframe
+    soupCol: The string title of the soup column
+    vectorizer: an initialized vectorizer, with all pre-processing you desire
+    vectorType: 'Tfidf' or 'Count' - representing the type of vectorizer you used.
+
+    Returns
+    Sparse Similarity Matrix
+    '''
+    # Replace NaN with an empty string
+    df[soupCol] = df[soupCol].fillna('')
+
+    #Compute similarity based on the vectorization type
+	
+    if vectorType == 'Count':
+        count_matrix = count.fit_transform(df[soupCol])
+
+        # Compute the cosine similarity score
+        sim_matrix = cosine_similarity(count_matrix, count_matrix)
+
+    elif vectorType == 'Tfidf':
+
+        tfidf_matrix = tfidf.fit_transform(df[soupCol])
+
+        # Compute the dot product similarity matrix
+        sim_matrix = linear_kernel(tfidf_matrix, tfidf_matrix)
+
+    sim_matrix = pd.DataFrame(sim_matrix, index=df.index, columns=df.index)
+    return sim_matrix
+
+
+tfidf = TfidfVectorizer(tokenizer=LemmaTokenizer(
+), lowercase=True, stop_words=lemmatized_stop_words, max_features=1000)
+sim = makesimmatrix(food_df, 'soup2', tfidf, 'Tfidf')
+round(sim.loc[999,28], 3)
+#homemade buttermilk pancakes & buttermilk buckwheat pancakes gluten free
+
+count = CountVectorizer(stop_words='english', lowercase=True,
+                        max_features=1000, ngram_range=(1, 2))
+sim = makesimmatrix(food_df, 'soup2', count, 'Count')
+round(sim.loc[999,28], 3)
+
+
+def cont_recommend(df, seed, seedCol, sim_matrix, topN=5):
+# Adapted from
+# Title: DS775 Prescriptive Analytics
+# Author: Jeff Baggett
+# Date: Spring 2023
+# Availability: #https://github.com/DataScienceUWL/DS775/blob/main/Lessons/Lesson%2013%#20-#%20RecSys%201/Lesson_13.ipynb
+
+    # get the indices based on the seedCol
+    indices = pd.Series(df.index, index=df[seedCol]).drop_duplicates()
+
+    # Obtain the index of the item that matches our seed
+    idx = indices[seed]
+
+    # Get the pairwise similarity scores of all items and convert to tuples
+    sim_scores = list(enumerate(sim_matrix[idx]))
+
+    # Find the index of the seed in sim_scores
+    for i, score in sim_scores:
+        if df.iloc[i][seedCol] == seed:
+            seed_idx_in_sim_scores = i
+            break
+
+    # If the seed is found in sim_scores, remove it
+    if seed_idx_in_sim_scores is not None:
+        filtered_sim_scores = []
+        for i, score in sim_scores:
+            if i != seed_idx_in_sim_scores:
+                filtered_sim_scores.append((i, score))
+        sim_scores = filtered_sim_scores
+
+    # Sort the items based on the similarity scores
+    sim_scores.sort(key=itemgetter(1), reverse=True)
+
+    # Get the top-N most similar items
+    if topN < len(sim_scores):
+        sim_scores = sim_scores[:topN]
+
+    # Extract item indices from the top-N most similar items
+    recipe_indices = []
+    for i, _ in sim_scores:
+        recipe_indices.append(i)
+
+    # Return the top-N most similar items
+    return df.iloc[recipe_indices]
+
+# Call the function
+cont_recommend(food_df, 'one dish chicken and rice bake', 'name', sim, 5)
+
+merged_lf = pd.merge(out_recipeslf, food_df, on='id', how='left')
+
+# count = CountVectorizer(stop_words='english', lowercase=True,
+#                         max_features=1000, ngram_range=(1, 2))
+
+# sim = makesimmatrix(merged_lf, 'soup2', count, 'Count')
+
+tfidf = TfidfVectorizer(tokenizer=LemmaTokenizer(
+), lowercase=True, stop_words=lemmatized_stop_words, max_features=1000)
+
+sim = makesimmatrix(merged_lf, 'soup2', tfidf, 'Tfidf')
+
+
+low_fat = cont_recommend(merged_lf, 'quinoa toasted', 'name_x', sim, 5)
+
+merged_ls = pd.merge(out_recipesls, food_df, on='id', how='left')
+
+# count = CountVectorizer(stop_words='english', lowercase=True,
+#                         max_features=1000, ngram_range=(1, 2))
+# sim = makesimmatrix(merged_ls, 'soup2', count, 'Count')
+
+tfidf = TfidfVectorizer(tokenizer=LemmaTokenizer(
+), lowercase=True, stop_words=lemmatized_stop_words, max_features=1000)
+
+sim = makesimmatrix(merged_ls, 'soup2', tfidf, 'Tfidf')
+
+low_sugar = cont_recommend(merged_ls, 'tiny cinnamon rolls', 'name_x', sim, 5)
+
+merged_ld = pd.merge(out_recipesld, food_df, on='id', how='left')
+
+
+# count = CountVectorizer(stop_words='english', lowercase=True,
+#                         max_features=1000, ngram_range=(1, 2))
+# sim = makesimmatrix(merged_ld, 'soup2', count, 'Count')
+
+tfidf = TfidfVectorizer(tokenizer=LemmaTokenizer(
+), lowercase=True, stop_words=lemmatized_stop_words, max_features=1000)
+
+sim = makesimmatrix(merged_ld, 'soup2', tfidf, 'Tfidf')
+
+low_sod = cont_recommend(merged_ld, 'zesty oven baked fries', 'name_x', sim, 5)
+
+
+count = CountVectorizer(stop_words='english', lowercase=True,
+                        max_features=1000, ngram_range=(1, 2))
+
+sim = makesimmatrix(food_df, 'soup2', count, 'Count')
+
+conrecom = cont_recommend(
+    food_df, 'one dish chicken and rice bake', 'name', sim, topN=5)
+
+
+tfidf = TfidfVectorizer(tokenizer=LemmaTokenizer(
+), lowercase=True, stop_words=lemmatized_stop_words, max_features=1000)
+
+sim = makesimmatrix(food_df, 'soup2', tfidf, 'Tfidf')
+
+tfidfrecom = cont_recommend(
+    food_df, 'one dish chicken and rice bake', 'name', sim, topN=5)
+
+sns.set_style("darkgrid")
+plt.style.use('ggplot')
+
+ratings.head()
+
+rate_min = ratings['rating'].min()
+
+rate_max = ratings['rating'].max()
+
+#ratings = ratings.drop(['date','review'],axis = 1)
+
+
+
+rate_median = np.median(np.arange(rate_min, rate_max+1))
+
+################ Not used ################################
+
+# # Assign X as the original ratings dataframe and y as the user_id column of ratings.
+# X = ratings.copy()
+# y = ratings['user_id']
+
+# # Identify classes with fewer instances
+# counts = y.value_counts()
+# rare_classes = counts[counts < 2].index
+
+# # Remove rows with rare classes
+# mask = y.isin(rare_classes)
+# X_filtered = X[~mask]
+# y_filtered = y[~mask]
+
+# # Perform stratified split on filtered data
+# X_train, X_test, y_train, y_test = train_test_split(
+#     X_filtered, y_filtered, stratify=y_filtered, test_size=0.20, random_state=14)
+
+
+
+# # Sentiment Analysis Scores
+# X = sent_ratings.copy()
+# y = sent_ratings['user_id']
+
+# # Identify classes with fewer instances
+# counts = y.value_counts()
+# rare_classes = counts[counts < 2].index
+
+# # Remove rows with rare classes
+# mask = y.isin(rare_classes)
+# X_filtered = X[~mask]
+# y_filtered = y[~mask]
+
+# # Perform stratified split on filtered data
+# X_train, X_test, y_train, y_test = train_test_split(
+#     X_filtered, y_filtered, stratify=y_filtered, test_size=0.20, random_state=14)
+
+
+#Redefine ratings matrix with sentiment scores for 2nd half of analysis
+ratings = sent_ratings.copy()
+ratings = ratings.rename(columns={'SentScore': 'rating'})
+
+
+
+
+# def baselinemed(user_id, recipe_id, scale_median, *args):
+#     return scale_median
+
+# # Function to compute the RMSE score
+# def rmse_score(cf_model, X_test, *args):
+
+#     # Extract user-item pairs from the testing dataset
+#     user_item_pairs = zip(X_test.iloc[:, 0], X_test.iloc[:, 1])
+
+#     # Predict ratings for each user-item pair
+#     y_pred = np.array([cf_model(user, item, *args) for user, item in user_item_pairs])
+
+#     # Get actual ratings from the test data
+#     y_true = np.array(X_test.iloc[:, 2])
+
+#     # Compute and return RMSE
+#     return mean_squared_error(y_true, y_pred, squared=False)
+
+# rmse_score(baselinemed, X_test, 3)
+#####################################################################
+
+
+
+
+
+##################### Surprise Algorithms ######################
+
+# https://surpriselib.com/
+
+######################### KNN ##################################
+
+#Set random seed for reproducibility
+my_seed = 14
+random.seed(my_seed)
+np.random.seed(my_seed)
+
+# Define a Reader object and load data
+reader = Reader(rating_scale=(1, 5))
+data = Dataset.load_from_df(ratings, reader)
+
+# Define the knn algorithm object
+knn = KNNBasic(k=3, verbose=False)
+
+
+# cross validates the model
+knn_cv = cross_validate(knn, data, measures=['RMSE'], cv=5, verbose=True)
+print(knn_cv)
+
+# extract the mean RMSE
+knn_RMSE = np.mean(knn_cv['test_rmse'])
+print(f'\nThe 5-fold RMSE was {knn_RMSE}')
+
+
+
+
+################################ SVD ##########################
+
+#Set random seed for reproducibility
+my_seed = 14
+random.seed(my_seed)
+np.random.seed(my_seed)
+
+# Define a Reader object and load the data
+reader = Reader(rating_scale=(1, 5))
+data = Dataset.load_from_df(ratings, reader)
+
+# Define the SVD algorithm object
+svd = SVD()
+
+# cross validate
+svd_cv = cross_validate(svd, data, measures=['RMSE'], cv=5, verbose=True)
+print(svd_cv)
+
+# extract the mean RMSE
+svd_RMSE = np.mean(svd_cv['test_rmse'])
+print(f'\nThe 5-fold RMSE was {svd_RMSE}')
+
+############################## Baseline Only #################
+
+#Set random seed for reproducibility
+my_seed = 14
+random.seed(my_seed)
+np.random.seed(my_seed)
+
+# Define a Reader object and load the data
+reader = Reader(rating_scale=(1, 5))
+data = Dataset.load_from_df(ratings, reader)
+
+# Define the baseline algorithm
+baseline = BaselineOnly()
+
+# Cross validates the model
+baseline_cv = cross_validate(baseline, data, measures=['RMSE'], cv=5, verbose=True)
+print(baseline_cv)
+
+# Extract the mean RMSE
+baseline_RMSE = np.mean(baseline_cv['test_rmse'])
+print(f'\nThe 5-fold RMSE was {baseline_RMSE}')
+
+
+
+###################### KNN Biased vs Unbiased ######################
+
+# Set random seed for reproducibility
+my_seed = 14
+random.seed(my_seed)
+np.random.seed(my_seed)
+
+# Define a Reader object and load the data
+reader = Reader(rating_scale=(1, 5))
+data = Dataset.load_from_df(ratings, reader)
+
+# Get raw ratings and shuffle them
+raw_ratings = data.raw_ratings
+random.shuffle(raw_ratings)
+
+# Split data into training (R) and testing (S) sets
+split_data = int(0.9 * len(raw_ratings))
+R_raw_ratings = raw_ratings[:split_data]
+S_raw_ratings = raw_ratings[split_data:]
+
+data.raw_ratings = R_raw_ratings
+
+# Perform grid search
+param_grid = {
+    'k': [3, 15],
+    'min_k': [1, 5]
+}
+grid_search = GridSearchCV(KNNBasic, param_grid, measures=['rmse'], cv=5)
+grid_search.fit(data)
+
+# Retrieve the best algorithm and parameters
+best_knn_algo = grid_search.best_estimator['rmse']
+
+# Retrain the model on the full training set (R)
+trainset = data.build_full_trainset()
+best_knn_algo.fit(trainset)
+
+# Compute and print biased accuracy on training set R
+train_predictions = best_knn_algo.test(trainset.build_testset())
+print(f'Biased accuracy on R = {accuracy.rmse(train_predictions)}')
+
+# Compute and print unbiased accuracy on test set S
+testset = data.construct_testset(S_raw_ratings)
+test_predictions = best_knn_algo.test(testset)
+print(f'Unbiased accuracy on S = {accuracy.rmse(test_predictions)}')
+
+# Display the best parameters
+print('Best parameters:', grid_search.best_params['rmse'])
+
+# Reset the data to its original state
+data.raw_ratings = raw_ratings
+
+# Rebuild the trainset and refit the model with the best parameters
+trainset = data.build_full_trainset()
+best_knn_algo = grid_search.best_estimator['rmse']
+best_knn_algo.fit(trainset)
+
+# Predict for a specific user and item
+prediction = best_knn_algo.predict(91392, 13445)
+print(f'Prediction for user 91392 and item 13445: {prediction.est}')
+
+# Define a function to get the prediction for a given row
+def get_prediction(row):
+    user_id = row['user_id']
+    recipe_id = row['recipe_id']
+    prediction = best_knn_algo.predict(user_id, recipe_id)
+    return prediction.est
+
+# Make predictions for the entire dataset
+pred_df = ratings.copy()
+pred_df['prediction'] = pred_df.apply(get_prediction, axis=1)
+
+print(pred_df)
+
+########################  SVD Biased vs Unbiased ######################
+
+
+# Set random seeds for reproducibility
+my_seed = 14
+random.seed(my_seed)
+np.random.seed(my_seed)
+
+# Define a Reader object and load data
+reader = Reader(rating_scale=(1, 5))
+data = Dataset.load_from_df(ratings, reader)
+
+# Shuffle ratings
+raw_ratings = data.raw_ratings
+random.shuffle(raw_ratings)
+
+# Split data into training (R) and testing (S) sets
+split_data = int(0.9 * len(raw_ratings))
+R_raw_ratings = raw_ratings[:split_data]
+S_raw_ratings = raw_ratings[split_data:]
+data.raw_ratings = R_raw_ratings
+
+# Perform grid search
+param_grid = {
+    'n_factors': [100, 125],
+    'n_epochs': [20, 25],
+    'lr_all': [0.005, 0.025],
+    'reg_all': [0.02, 0.05]
+}
+grid_search = GridSearchCV(SVD, param_grid, measures=['rmse'], cv=3)
+grid_search.fit(data)
+
+# Retrieve the best algorithm and parameters
+best_params = grid_search.best_params['rmse']
+best_svd_algo = grid_search.best_estimator['rmse']
+
+# Retrain the model on the full training set (R)
+trainset = data.build_full_trainset()
+best_svd_algo.fit(trainset)
+
+# Compute biased accuracy on training set R
+predictions = best_svd_algo.test(trainset.build_testset())
+print(f'Biased accuracy on R = {accuracy.rmse(predictions)}')
+
+# Compute unbiased accuracy on test set S
+testset = data.construct_testset(S_raw_ratings)
+predictions = best_svd_algo.test(testset)
+print(f'Unbiased accuracy on S = {accuracy.rmse(predictions)}')
+
+# Reset the data to the original state
+data.raw_ratings = raw_ratings
+
+# Rebuild the trainset and refit the algorithm with the best parameters
+trainset = data.build_full_trainset()
+best_svd_algo = grid_search.best_estimator['rmse']
+best_svd_algo.fit(trainset)
+
+# Predict for a specific user and item
+prediction = best_svd_algo.predict(91392, 13445)
+print(f'Prediction for user 91392 and item 13445: {prediction.est}')
+
+# Define a function to get the prediction for a given row
+def get_prediction(row):
+    user_id = row['user_id']
+    recipe_id = row['recipe_id']
+    prediction = best_svd_algo.predict(user_id, recipe_id)
+    return prediction.est
+
+# Make predictions for the entire dataset
+pred_df = ratings.copy()
+pred_df['prediction'] = pred_df.apply(get_prediction, axis=1)
+
+print(pred_df)
+
+
+##########################  Baseline Only Biased vs Unbiased ###########
+
+# Set random seed for reproducibility
+my_seed = 14
+random.seed(my_seed)
+np.random.seed(my_seed)
+
+# Define a Reader object and load the data
+reader = Reader(rating_scale=(1, 5))
+data = Dataset.load_from_df(ratings, reader)
+
+# Get raw ratings and shuffle them
+raw_ratings = data.raw_ratings
+random.shuffle(raw_ratings)
+
+# Split data into training (R) and testing (S) sets
+split_data = int(0.9 * len(raw_ratings))
+R_raw_ratings = raw_ratings[:split_data]
+S_raw_ratings = raw_ratings[split_data:]
+data.raw_ratings = R_raw_ratings
+
+# Perform grid search
+param_grid = {
+    'bsl_options': {
+        'method': ['als', 'sgd'],
+        'reg': [0.02, 0.05, 0.1],
+        'learning_rate': [0.001, 0.005, 0.01]
+    }
+}
+grid_search = GridSearchCV(BaselineOnly, param_grid, measures=['rmse'], cv=3)
+grid_search.fit(data)
+
+# Retrieve the best algorithm and parameters
+best_params = grid_search.best_params['rmse']
+best_baseline_algo = grid_search.best_estimator['rmse']
+
+# Retrain the model on the full training set (R)
+trainset = data.build_full_trainset()
+best_baseline_algo.fit(trainset)
+
+# Compute and print biased accuracy on training set R
+train_predictions = best_baseline_algo.test(trainset.build_testset())
+print(f'Biased accuracy on R = {accuracy.rmse(train_predictions)}')
+
+# Compute and print unbiased accuracy on test set S
+testset = data.construct_testset(S_raw_ratings)
+test_predictions = best_baseline_algo.test(testset)
+print(f'Unbiased accuracy on S = {accuracy.rmse(test_predictions)}')
+
+# Display the best parameters
+print('Best parameters:', best_params)
+
+# Reset the data to its original state
+data.raw_ratings = raw_ratings
+
+# Rebuild the trainset and refit the model with the best parameters
+trainset = data.build_full_trainset()
+best_baseline_algo = grid_search.best_estimator['rmse']
+best_baseline_algo.fit(trainset)
+
+# Predict for a specific user and item
+prediction = best_baseline_algo.predict(101823, 79222)
+print(f'Prediction for user 101823 and item 79222: {prediction.est}')
+
+# Define a function to get the prediction for a given row
+def get_prediction(row):
+    user_id = row['user_id']
+    recipe_id = row['recipe_id']
+    prediction = best_baseline_algo.predict(user_id, recipe_id)
+    return prediction.est
+
+# Make predictions for the entire dataset
+pred_df = ratings.copy()
+pred_df['prediction'] = pred_df.apply(get_prediction, axis=1)
+
+print(pred_df)
+
+
+###### Generate Content Recommender output to be used in Hybrid Recommender ######
+
+tfidf = TfidfVectorizer(tokenizer=LemmaTokenizer(
+), lowercase=True, stop_words=lemmatized_stop_words, max_features=1000)
+
+sim = makesimmatrix(food_df, 'soup2', tfidf, 'Tfidf')
+
+# display it
+pd.DataFrame(sim, index=food_df['name'], columns=food_df['name'])
+
+resultsa = cont_recommend(food_df, 'fajita style one dish chicken dinner', 'name', sim, 25)
+resultsa
+
+resultsb = cont_recommend(food_df, 'spanish green bean salad', 'name', sim, 25)
+resultsb
+
+
+resultsc = cont_recommend(food_df, 'apple oatmeal cookies', 'name', sim, 25)
+resultsc
+
+########################  Hybrid Recommender #########################
+
+
+def predict_rating(row, user, predCol, algorithm):
+
+    """
+    Function to predict the rating for a given row.
+        
+    """
+    return algorithm.predict(user, row[predCol]).est
+
+def hybrid_recommend(user, contentRecs, predCol, algorithm, N):
+# Adapted from
+# Title: DS775 Prescriptive Analytics
+# Author: Jeff Baggett
+# Date: Spring 2023
+# Availability: #https://github.com/DataScienceUWL/DS775/blob/main/Lessons/Lesson%2013%#20-%20RecSys%201/Lesson_13.ipynb
+    '''
+    Parameters:
+    user: the user for whom we are making predictions
+    contentRecs: the dataframe of items limited by content recommender
+    predCol: the column in contentRecs on which we'll be making pred (recipeID)
+    algorithm: a trained Surprise model used for making predictions
+    N: the number of predictions to return
+    
+    Returns:
+    a pandas dataframe containing the estimated rating for the user requested
+    '''
+
+    # Generate predicted ratings
+    contentRecs['est_rating'] = contentRecs.apply(predict_rating, axis=1, args=(user, predCol, algorithm))
+    
+    # Sort the results
+    contentRecs = contentRecs.sort_values('est_rating', ascending=False)
+    
+    # Return the final N number of results
+    return contentRecs.head(N)
+
+# Call hybrid_recommend with user 1355 using SVDalgo and results a, b, c
+
+hybridsvdgsalgoa = hybrid_recommend(1355, resultsa, 'id', best_svd_algo, 5)
+
+
+hybridsvdgsalgob = hybrid_recommend(1355, resultsb, 'id', best_svd_algo, 5)
+
+
+hybridsvdgsalgoc = hybrid_recommend(1355, resultsc, 'id', best_svd_algo, 5)
+
+
+####################### HTLM Files ###################################
+# Adapted from OpenAI. (2023). ChatGPT (October 2023 version) [Large language model]. #https://chat.openai.com/chat
+
+# Define a function to highlight rows based on a condition
+def highlight_row(row):
+    if row['sodium'] >= 40:
+        return ['background-color: red'] * len(row)
+    elif row['sodium'] < 20:
+        return ['background-color: green'] * len(row)
+    else:
+        return [''] * len(row)
+
+# Apply styles to DataFrame
+styled_dfa = hybridsvdgsalgoa.style.apply(highlight_row, axis=1)
+
+# Display styled DataFrame
+styled_dfa
+styled_htmla = styled_dfa.render()
+with open('styled_dataframea.html', 'w') as f:
+    f.write(styled_htmla)
+
+
+
+# Define a function to highlight rows based on a condition
+def highlight_row(row):
+    if row['sugar'] >= 40:
+        return ['background-color: red'] * len(row)
+    elif row['sugar'] < 20:
+        return ['background-color: green'] * len(row)
+    else:
+        return [''] * len(row)
+
+# Apply styles to DataFrame
+styled_dfb = hybridsvdgsalgob.style.apply(highlight_row, axis=1)
+
+# Display styled DataFrame
+styled_dfb
+styled_htmlb = styled_dfb.render()
+with open('styled_dataframeb.html', 'w') as f:
+    f.write(styled_htmlb)
+
+
+
+
+# Define a function to highlight rows based on a condition
+def highlight_row(row):
+    if row['saturated_fat'] >= 40:
+        return ['background-color: red'] * len(row)
+    elif row['saturated_fat'] < 20:
+        return ['background-color: green'] * len(row)
+    else:
+        return [''] * len(row)
+
+# Apply styles to DataFrame
+styled_dfc = hybridsvdgsalgoc.style.apply(highlight_row, axis=1)
+
+# Display styled DataFrame
+styled_dfc
+styled_htmlc = styled_dfc.render()
+with open('styled_dataframec.html', 'w') as f:
+    f.write(styled_htmlc)
+
+
+
+################## File Exports #############################
+
+file_name = 'food_df.xlsx'
+
+food_df.to_excel(file_name)
+
+file_name = 'food_df2.xlsx'
+
+food_df2.to_excel(file_name)
+
+file_name = 'conrecom.xlsx'
+
+conrecom.to_excel(file_name)
+
+file_name = 'tfidfrecom.xlsx'
+
+tfidfrecom.to_excel(file_name)
+
+file_name = 'top_meals.xlsx'
+
+top_meals.to_excel(file_name)
+
+file_name = 'out_recipesa.xlsx'
+
+out_recipesa.to_excel(file_name)
+
+file_name = 'out_recipesb.xlsx'
+
+out_recipesb.to_excel(file_name)
+
+file_name = 'out_recipesc.xlsx'
+
+out_recipesc.to_excel(file_name)
+
+
+file_name = 'out_recipeslf.xlsx'
+
+out_recipeslf.to_excel(file_name)
+
+
+file_name = 'out_recipesls.xlsx'
+
+out_recipesls.to_excel(file_name)
+
+
+file_name = 'out_recipessd.xlsx'
+
+out_recipesld.to_excel(file_name)
+
+file_name = 'out_recipes_default.xlsx'
+
+out_recipes_default.to_excel(file_name)
+
+
+file_name = 'hybridbasegsalgo.xlsx'
+
+hybridbasegsalgo.to_excel(file_name)
+
+
+file_name = 'hybridsvdgsalgo3.xlsx'
+
+hybridsvdgsalgo.to_excel(file_name)
+
+
+file_name = 'hybridresultstab.xlsx'
+
+hybridresultstab.to_excel(file_name)
+
+
+file_name = 'food_df2.xlsx'
+
+food_df2.to_excel(file_name)
+
+
+file_name = 'resultsa.xlsx'
+
+resultsa.to_excel(file_name)
+
+
+file_name = 'resultsb.xlsx'
+
+resultsb.to_excel(file_name)
+
+
+file_name = 'resultsc.xlsx'
+
+resultsc.to_excel(file_name)
+
+
+file_name = 'hybridbasegsalgoa.xlsx'
+
+hybridbasegsalgoa.to_excel(file_name)
+
+
+file_name = 'hybridsvdgsalgoa.xlsx'
+
+hybridsvdgsalgoa.to_excel(file_name)
+
+
+file_name = 'hybridbasegsalgob.xlsx'
+
+hybridbasegsalgob.to_excel(file_name)
+
+
+file_name = 'hybridsvdgsalgob.xlsx'
+
+hybridsvdgsalgob.to_excel(file_name)
+
+
+
+file_name = 'hybridbasegsalgoc.xlsx'
+
+hybridbasegsalgoc.to_excel(file_name)
+
+
+file_name = 'hybridsvdgsalgoc.xlsx'
+
+hybridsvdgsalgoc.to_excel(file_name)
+
+
+
+
+
+
+######################################################################
+
+
+
+

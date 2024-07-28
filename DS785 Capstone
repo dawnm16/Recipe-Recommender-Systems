@@ -1081,7 +1081,15 @@ print(f'\nThe 5-fold RMSE was {baseline_RMSE}')
 
 
 
-###################### KNN Biased vs Unbiased ######################
+###########################  Biased vs Unbiased ######################
+# Order of steps adapted from
+# Title: DS775 Prescriptive Analytics
+# Author: Jeff Baggett
+# Date: Spring 2023
+# Availability: https://github.com/DataScienceUWL/DS775/blob/main/Lessons/Lesson%2014%20-%20RecSys%202/Lesson_14.ipynb
+
+
+########################### KNN Biased vs Unbiased #################################
 
 # Set random seed for reproducibility
 my_seed = 14
@@ -1344,7 +1352,7 @@ def hybrid_recommend(user, contentRecs, predCol, algorithm, N):
 # Title: DS775 Prescriptive Analytics
 # Author: Jeff Baggett
 # Date: Spring 2023
-# Availability: #https://github.com/DataScienceUWL/DS775/blob/main/Lessons/Lesson%2013%#20-%20RecSys%201/Lesson_13.ipynb
+# Availability: https://github.com/DataScienceUWL/DS775/blob/main/Lessons/Lesson%2014%20-%20RecSys%202/Lesson_14.ipynb
     '''
     Parameters:
     user: the user for whom we are making predictions

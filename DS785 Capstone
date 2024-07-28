@@ -185,10 +185,6 @@ descfood = food_df.describe()
 food_df = food_df[food_df['minutes'] <= 5000]
 food_df2 = food_df2[food_df2['minutes'] <= 5000]
 
-
-print('Missing values make up', round(food_df.isna().sum().sum() /
-      food_df.shape[0]*100, 2), "%", "of the overall data.")
-
 # Remove missing description rows
 food_df.dropna(subset=['description'], inplace=True)
 food_df2.dropna(subset=['description'], inplace=True)
